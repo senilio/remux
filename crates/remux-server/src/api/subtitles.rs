@@ -12,11 +12,16 @@ use uuid::Uuid;
 
 use crate::{
     AppState, IntoApiError, OptionExt, ResultExt, api, common::HideConsole, db,
-    db::auth,
+    db::auth, playback::engine::ffmpeg_reconnect_args,
 };
 
 fn ffmpeg_bin() -> String {
     std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into())
+}
+
+fn add_ffmpeg_input_args(cmd: &mut tokio::process::Command, input_url: &str) {
+    cmd.args(ffmpeg_reconnect_args(input_url));
+    cmd.args(["-i", input_url]);
 }
 
 /// The cache storage codec for a requested text subtitle format: ASS/SSA requests
@@ -104,20 +109,9 @@ async fn extract_subtitle_to_cache(
     let mut cmd = tokio::process::Command::new(ffmpeg_bin());
     cmd.hide_console();
     cmd.kill_on_drop(true);
+    cmd.args(["-y", "-nostdin", "-copyts"]);
+    add_ffmpeg_input_args(&mut cmd, input_url);
     cmd.args([
-        "-y",
-        "-nostdin",
-        "-copyts",
-        "-reconnect",
-        "1",
-        "-reconnect_at_eof",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_delay_max",
-        "5",
-        "-i",
-        input_url,
         "-map",
         map_spec,
         "-an",
@@ -621,18 +615,9 @@ async fn subtitles_stream_inner(
         let mut cmd = tokio::process::Command::new(ffmpeg_bin());
         cmd.hide_console();
         cmd.kill_on_drop(true);
+        cmd.args(["-copyts"]);
+        add_ffmpeg_input_args(&mut cmd, &url);
         cmd.args([
-            "-copyts",
-            "-reconnect",
-            "1",
-            "-reconnect_at_eof",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-            "-i",
-            &url,
             "-map",
             &map_spec,
             "-an",
@@ -967,6 +952,43 @@ mod tests {
                 .text()
                 .is_empty(),
             "tickless route must dispatch to the subtitle handler, not a bare route-miss 404"
+        );
+    }
+
+    fn subtitle_input_args(input_url: &str) -> Vec<String> {
+        let mut cmd = tokio::process::Command::new("ffmpeg");
+        add_ffmpeg_input_args(&mut cmd, input_url);
+        cmd.as_std()
+            .get_args()
+            .map(|arg| {
+                arg.to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_subtitle_input_places_no_protocol_options_before_input() {
+        assert_eq!(
+            subtitle_input_args("/media/tv/show/episode.mkv"),
+            ["-i", "/media/tv/show/episode.mkv"]
+        );
+    }
+
+    #[test]
+    fn http_subtitle_input_places_reconnect_options_before_input() {
+        assert_eq!(
+            subtitle_input_args("https://cdn.example.com/video.mkv"),
+            [
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "5",
+                "-i",
+                "https://cdn.example.com/video.mkv",
+            ]
         );
     }
 
