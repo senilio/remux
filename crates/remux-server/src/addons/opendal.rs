@@ -719,10 +719,11 @@ impl StreamAddon for OpendalAddon {
                 };
                 crate::stream::StreamInfo {
                     descriptor,
-                    name: Some(
+                    filename: Some(
                         f.name
                             .clone(),
                     ),
+                    name: Some(f.name),
                     ..Default::default()
                 }
             })
@@ -971,10 +972,11 @@ impl TreeAddon for OpendalAddon {
                             parent_idx: Some(season_num),
                             stream_info: Some(crate::stream::StreamInfo {
                                 descriptor,
-                                name: Some(
+                                filename: Some(
                                     f.name
                                         .clone(),
                                 ),
+                                name: Some(f.name),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -2011,6 +2013,58 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn opendal_local_stream_media_source_path_uses_filename_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        write_files(
+            dir.path(),
+            &[("[imdbid-tt0133093] The Matrix (1999).mkv", b"fake")],
+        );
+
+        let (_, guard) = new_test_server()
+            .await
+            .unwrap();
+        let ctx = &guard.0;
+        let (addon, db_addon) = make_local_addon(ctx, dir.path(), "movie").await;
+        addon
+            .refresh_index(ctx, &db_addon, noop_progress())
+            .await
+            .unwrap();
+
+        let stream = addon
+            .get_streams(
+                &db::Media {
+                    kind: db::MediaKind::Movie,
+                    external_ids: db::ExternalIds {
+                        imdb: db::NonEmptyString::try_new("tt0133093".to_string()).ok(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ctx,
+                None,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let id = Uuid::nil();
+        let source = api::MediaSourceInfo::from(db::Media {
+            id,
+            stream_info: Some(stream),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            source
+                .path
+                .as_deref(),
+            Some(
+                "/remux/00000000-0000-0000-0000-000000000000/[imdbid-tt0133093] The Matrix (1999)"
+            )
+        );
+    }
+
     // -----------------------------------------------------------------------
     // E2E: episodes — index multiple files with varied naming across two
     // series, verify scan results, catalog structure, and full tree from
@@ -2313,6 +2367,42 @@ mod tests {
                     assert!(
                         matches!(info.descriptor, StreamDescriptor::Local(_)),
                         "{imdb} s{season_num} e{:?}: expected Local stream",
+                        ep.idx
+                    );
+                    let episode_num = ep
+                        .idx
+                        .unwrap();
+                    let fixture = fixtures
+                        .iter()
+                        .find(|f| {
+                            f.expected_imdb == imdb
+                                && f.expected_season == season_num
+                                && f.expected_episode == episode_num
+                        })
+                        .unwrap();
+                    let expected_filename = std::path::Path::new(fixture.rel_path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap();
+                    assert_eq!(
+                        info.filename
+                            .as_deref(),
+                        Some(expected_filename),
+                        "{imdb} s{season_num} e{:?}: expected backing filename",
+                        ep.idx
+                    );
+                    let expected_stem = std::path::Path::new(expected_filename)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap();
+                    let expected_path = format!("/remux/{}/{expected_stem}", ep.id);
+                    let source = api::MediaSourceInfo::from(ep.clone());
+                    assert_eq!(
+                        source
+                            .path
+                            .as_deref(),
+                        Some(expected_path.as_str()),
+                        "{imdb} s{season_num} e{:?}: expected filename path",
                         ep.idx
                     );
                 }
